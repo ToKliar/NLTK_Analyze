@@ -204,6 +204,9 @@ HMM分为两个部分，第一部分是使用HMM进行标签序列的生成，�
 
 下面解析HiddenMarkovModelTagger中的主要方法和实现方式。
 
+这里需要注意，对于词性标注任务，状态是word，标签是tag
+
+NLTK中HMM的生成和训练如下：
 ```python
 class HiddenMarkovModelTagger(TaggerI):
     """
@@ -213,8 +216,7 @@ class HiddenMarkovModelTagger(TaggerI):
     transitions：从某一状态转换到另一个状态的概率，基于ConditionalProbDistI接口
     outputs：从某一状态生成某一标签的概率，基于ConditionalProbDistI
     priors：初始状态的概率分布，基于ProbDistI
-    transform：
-    :param transform: 用于转换状态序列，可选，默认不做任何转换
+    transform：用于转换状态序列，可选，默认不做任何转换
     """
 
     def __init__(
@@ -231,17 +233,10 @@ class HiddenMarkovModelTagger(TaggerI):
 
     @classmethod
     def _train(
-        cls,
-        labeled_sequence,
-        test_sequence=None,
-        unlabeled_sequence=None,
-        transform=_identity,
-        estimator=None,
-        **kwargs,
+        cls, labeled_sequence, test_sequence=None, unlabeled_sequence=None, transform=_identity, estimator=None, **kwargs,
     ):
-
+        # HMM的训练过程，这里需要注意，对于带有标签的状态序列使用监督学习模式
         if estimator is None:
-
             def estimator(fd, bins):
                 return LidstoneProbDist(fd, 0.1, bins)
 
@@ -250,6 +245,7 @@ class HiddenMarkovModelTagger(TaggerI):
         tag_set = unique_list(tag for sent in labeled_sequence for word, tag in sent)
 
         trainer = HiddenMarkovModelTrainer(tag_set, symbols)
+        # 监督学习方法根据带标签的状态序列，训练生成多个概率矩阵（初始概率，状态转移概率，状态生成标签概率）
         hmm = trainer.train_supervised(labeled_sequence, estimator=estimator)
         hmm = cls(
             hmm._symbols,
@@ -265,6 +261,7 @@ class HiddenMarkovModelTagger(TaggerI):
 
         if unlabeled_sequence:
             max_iterations = kwargs.get("max_iterations", 5)
+            # 如果存在无标签的状态序列，在原模型的基础上使用无监督学习加强训练，并进行测试
             hmm = trainer.train_unsupervised(
                 unlabeled_sequence, model=hmm, max_iterations=max_iterations
             )
@@ -272,65 +269,38 @@ class HiddenMarkovModelTagger(TaggerI):
                 hmm.test(test_sequence, verbose=kwargs.get("verbose", False))
 
         return hmm
+```
 
-    @classmethod
-    def train(
-        cls, labeled_sequence, test_sequence=None, unlabeled_sequence=None, **kwargs
-    ):
-        """
-        使用cls(HiddenMarkovModelTrainer对象)根据带标签的序列和无标签的序列训练得到一个HMM模型
+HMM的应用主要有三个方面的问题：
 
-        labeled_sequence: 带标签的训练序列
-        test_sequence: 带标签的测试序列
-        unlabeled_sequence: 不带标签的训练序列
-        kwargs中可选参数为
-        estimator 
-        :param estimator: an optional function or class that maps a
-            condition's frequency distribution to its probability
-            distribution, defaults to a Lidstone distribution with gamma = 0.1
+**应用问题**：已知模型参数和标签序列的情况下（状态序列是否已知不重要），计算标签序列出现的概率
 
-        verbose: 是否展示训练信息
-        max_iterations: Baum-Welch训练算法的迭代次数
-        """
-        return cls._train(labeled_sequence, test_sequence, unlabeled_sequence, **kwargs)
+HMM通过probability方法计算标签序列出现的概率，采用前向或者后向算法进行计算，代码中采用前向算法
 
+```python
     def probability(self, sequence):
-        """
-        Returns the probability of the given symbol sequence. If the sequence
-        is labelled, then returns the joint probability of the symbol, state
-        sequence. Otherwise, uses the forward algorithm to find the
-        probability over all label sequences.
-
-        :return: the probability of the sequence
-        :rtype: float
-        :param sequence: the sequence of symbols which must contain the TEXT
-            property, and optionally the TAG property
-        :type sequence:  Token
-        """
         return 2 ** (self.log_probability(self._transform(sequence)))
 
     def log_probability(self, sequence):
         """
-        Returns the log-probability of the given symbol sequence. If the
-        sequence is labelled, then returns the joint log-probability of the
-        symbol, state sequence. Otherwise, uses the forward algorithm to find
-        the log-probability over all label sequences.
+        如果sequence是带有标签的状态序列，返回sequence中的状态序列生成标签序列的概率，
 
-        :return: the log-probability of the sequence
-        :rtype: float
-        :param sequence: the sequence of symbols which must contain the TEXT
-            property, and optionally the TAG property
-        :type sequence:  Token
+        如果sequence是不带状态的标签序列，计算标签序列出现概率的方法是，算出每个可能的状态序列生成标签序列的概率并求和。
+        等价于：返回标签序列生成最后一个状态（最后一个状态可能是标签集合中任意一个标签）的概率之和
+
+        因为序列长度比较长时，序列生成概率比较小，所以这里用对数的形式计算使得最后的结果更精准
         """
-        sequence = self._transform(sequence)
+        sequence = self._transform(sequence) # 对序列进行转换，默认不转换
 
         T = len(sequence)
 
         if T > 0 and sequence[0][_TAG]:
+            # 第一个标签的概率的对数为生成第一个状态的概率的对数加上第一个状态生成第一个标签的概率
             last_state = sequence[0][_TAG]
             p = self._priors.logprob(last_state) + self._output_logprob(
                 last_state, sequence[0][_TEXT]
-            )
+            ) 
+            # 生成第i个标签的概率的对数为第i-1个状态转换到第i个状态的概率的对数加上第i个状态生成第i个标签的概率
             for t in range(1, T):
                 state = sequence[t][_TAG]
                 p += self._transitions[last_state].logprob(
@@ -342,119 +312,124 @@ class HiddenMarkovModelTagger(TaggerI):
             alpha = self._forward_probability(sequence)
             p = logsumexp2(alpha[T - 1])
             return p
+```
 
-    def _tag(self, unlabeled_sequence):
-        path = self._best_path(unlabeled_sequence)
-        return list(zip(unlabeled_sequence, path))
+前向算法是一个递推算法
++ 标签序列记为$[t_1, t_2, ..., t_T]$，状态序列为$[s_1, s_2, ..., s_T]$，状态集为$[o_1, o_2, ..., o_N]$，这里$t_i$是固定值，$s_i$非定值
++ $\lambda$表示模型中的参数
++ 对应的alpha为 T x N矩阵（T为序列长度，N为状态集大小）
++ $transition[i, k] = P(s_n = o_k | s_{n-1} = o_i), n - 1 > 0$
++ $alpha[n, k] = P(t_1, t_2, ..., t_n, s_n = o_k | \lambda)$
++ $alpha[1, k] = P(s_1 = o_k | \lambda) * P(t_1 | s_1 = o_k)$
++ $alpha[n, k] = \sum_{i=1}^N P(t_1, t_2, ..., t_{n-1}, s_n = o_i | \lambda) * P(s_n = o_k | s_{n-1} = o_i) * P(t_n | s_n = o_k) = P(t_n | s_n = o_k) * \sum_{i=1}^N alpha[n-1,i] * transition[i, k]$
 
-    def _output_logprob(self, state, symbol):
-        """
-        :return: the log probability of the symbol being observed in the given
-            state
-        :rtype: float
-        """
-        return self._outputs[state].logprob(symbol)
-
-    def _create_cache(self):
-        """
-        The cache is a tuple (P, O, X, S) where:
-
-          - S maps symbols to integers.  I.e., it is the inverse
-            mapping from self._symbols; for each symbol s in
-            self._symbols, the following is true::
-
-              self._symbols[S[s]] == s
-
-          - O is the log output probabilities::
-
-              O[i,k] = log( P(token[t]=sym[k]|tag[t]=state[i]) )
-
-          - X is the log transition probabilities::
-
-              X[i,j] = log( P(tag[t]=state[j]|tag[t-1]=state[i]) )
-
-          - P is the log prior probabilities::
-
-              P[i] = log( P(tag[0]=state[i]) )
-        """
-        if not self._cache:
-            N = len(self._states)
-            M = len(self._symbols)
-            P = np.zeros(N, np.float32)
-            X = np.zeros((N, N), np.float32)
-            O = np.zeros((N, M), np.float32)
-            for i in range(N):
-                si = self._states[i]
-                P[i] = self._priors.logprob(si)
-                for j in range(N):
-                    X[i, j] = self._transitions[si].logprob(self._states[j])
-                for k in range(M):
-                    O[i, k] = self._output_logprob(si, self._symbols[k])
-            S = {}
-            for k in range(M):
-                S[self._symbols[k]] = k
-            self._cache = (P, O, X, S)
-
-    def _update_cache(self, symbols):
-        # add new symbols to the symbol table and repopulate the output
-        # probabilities and symbol table mapping
-        if symbols:
-            self._create_cache()
-            P, O, X, S = self._cache
-            for symbol in symbols:
-                if symbol not in self._symbols:
-                    self._cache = None
-                    self._symbols.append(symbol)
-            # don't bother with the work if there aren't any new symbols
-            if not self._cache:
-                N = len(self._states)
-                M = len(self._symbols)
-                Q = O.shape[1]
-                # add new columns to the output probability table without
-                # destroying the old probabilities
-                O = np.hstack([O, np.zeros((N, M - Q), np.float32)])
-                for i in range(N):
-                    si = self._states[i]
-                    # only calculate probabilities for new symbols
-                    for k in range(Q, M):
-                        O[i, k] = self._output_logprob(si, self._symbols[k])
-                # only create symbol mappings for new symbols
-                for k in range(Q, M):
-                    S[self._symbols[k]] = k
-                self._cache = (P, O, X, S)
-
-    def best_path(self, unlabeled_sequence):
-        """
-        Returns the state sequence of the optimal (most probable) path through
-        the HMM. Uses the Viterbi algorithm to calculate this part by dynamic
-        programming.
-
-        :return: the state sequence
-        :rtype: sequence of any
-        :param unlabeled_sequence: the sequence of unlabeled symbols
-        :type unlabeled_sequence: list
-        """
-        unlabeled_sequence = self._transform(unlabeled_sequence)
-        return self._best_path(unlabeled_sequence)
-
-    def _best_path(self, unlabeled_sequence):
+```python
+     def _forward_probability(self, unlabeled_sequence):
         T = len(unlabeled_sequence)
         N = len(self._states)
+        alpha = _ninf_array((T, N))
+
+        transitions_logprob = self._transitions_matrix()
+
+        # Initialization
+        # alpha[0, k]等于状态k的初始生成概率和状态k生成第一个标签的概率
+        symbol = unlabeled_sequence[0][_TEXT]
+        for i, state in enumerate(self._states):
+            alpha[0, i] = self._priors.logprob(state) + self._output_logprob(
+                state, symbol
+            )
+
+        # 不断前向传播，alpha[t, k]的概率为 第t-1个状态为任意状态i的概率乘以状态i转移到状态k的概率再求和，最后乘以状态k生成第k个标签的概率
+        # 这里注意保存的概率是概率的对数，所以在计算下一个概率的对数的时候需要用logsumexp2计算
+        for t in range(1, T):
+            symbol = unlabeled_sequence[t][_TEXT]
+            output_logprob = self._outputs_vector(symbol)
+
+            for i in range(N):
+                summand = alpha[t - 1] + transitions_logprob[i]
+                alpha[t, i] = logsumexp2(summand) + output_logprob[i]
+
+        return alpha
+```
+
+后向算法也是递推算法
++ 标签序列记为$[t_1, t_2, ..., t_T]$，状态序列为$[s_1, s_2, ..., s_T]$，状态集为$[o_1, o_2, ..., o_N]$，这里$t_i$是固定值，$s_i$非定值
++ 对应的beta为 T x N矩阵（T为序列长度，N为状态集大小）
++ $transition[i, k] = P(s_n = o_k | s_{n-1} = o_i), n - 1 > 0$
++ $prior[i] = P(s_1 = o_i | \lambda)$
++ $beta[n, k] = P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda)$
++ $beta[T, k] = 1$
++ $beta[n, k] = P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda) = \sum_{i=1}^N P(t_T, t_{T-1}, ..., t_{n+1}, s_{n+1} = o_i | s_n = o_k , \lambda) = \sum_{i=1}^N P(t_T, t_{T-1}, ..., t_{n+2} | s_{n+1} = o_i, \lambda) * P (s_{n+1} = o_i | s_n = o_k) * P(t_{n+1} | s_{n + 1} = o_i) $
++ $beta[n, k] = \sum_{i=1}^N transition[i, k] * P(t_{n+1} | s_{n + 1} = o_i) * beta[n + 1, i]$
++ 最终概率$P = \sum_{i=1}^N beta[1, i] * prior[i] * P(t_1 | s_1 = o_i)$
+
+```python
+    def _backward_probability(self, unlabeled_sequence):
+        T = len(unlabeled_sequence)
+        N = len(self._states)
+        beta = _ninf_array((T, N))
+
+        transitions_logprob = self._transitions_matrix().T
+
+        # initialise the backward values;
+        # "1" is an arbitrarily chosen value from Rabiner tutorial
+        beta[T - 1, :] = np.log2(1)
+
+        # inductively calculate remaining backward values
+        for t in range(T - 2, -1, -1):
+            symbol = unlabeled_sequence[t + 1][_TEXT]
+            outputs = self._outputs_vector(symbol)
+
+            for i in range(N):
+                summand = transitions_logprob[i] + beta[t + 1] + outputs
+                beta[t, i] = logsumexp2(summand)
+
+        return beta
+```
+
+**预测问题**：也叫做解码问题，已知模型参数和标签序列，找到最可能的状态序列，使用Viterbi算法求解  
+
+对于长度为T的标签序列，状态集的大小为N，则可能的状态序列的数量为$N^T$个，每个状态序列生成这个标签序列的概率是不同的，找到概率最大的那个状态序列。  
+对应的Viterbi算法如下：
++ 标签序列记为$[t_1, t_2, ..., t_T]$，可能的状态序列为$[s_1, s_2, ..., s_T]$，状态集为$[o_1, o_2, ..., o_N]$
++ $P(t_1, t_2, ..., t_n | s_1, ..., s_n) = P(t_1, t_2, ..., t_{n-1} | s_1, s_2, ..., s_{n-1}) * P(s_n | s_{n-1}) * P(t_n | s_n) $
++ $V[n, k] = max(P(t_1, t_2, ..., t_n, s_n = o_k)) $即第n个状态为$o_k$的序列中最可能生成$[t_1, t_2, ..., t_n]$的状态序列的概率
++ $V[n, k] = max(V[n - 1, i] * X(o_i, o_k)) * O(o_k, t_n), i \in {1, ..., N}$
+
+```python
+    def _best_path(self, unlabeled_sequence):
+        """
+        unlabeled_sequence为一个标签序列，该函数负责找到最有可能的状态序列（状态序列生成这个标签序列的可能性最大）
+        The cache is a tuple (P, O, X, S) where:
+          - S 代表标签字典，一个标签对应一个序号
+          - O 代表状态生成标签概率矩阵
+          - X 代表状态转移概率矩阵
+          - P 代表第一个状态是状态k的概率
+        整体的算法如下：动态规划算法
+        标签序列记为[t1, t2]
+        最重要找的状态序列是[a1, a2, ..., at]这个序列在所有的序列中生成这个标签序列的可能性最大
+        
+        """
+        unlabeled_sequence = self._transform(unlabeled_sequence)
+        T = len(unlabeled_sequence)
+        N = len(self._states)
+        # 使用cache缓存计算所需的参数
         self._create_cache()
         self._update_cache(unlabeled_sequence)
         P, O, X, S = self._cache
 
-        V = np.zeros((T, N), np.float32)
-        B = -np.ones((T, N), int)
+        V = np.zeros((T, N), np.float32) # V[t, k] 根据前t个标签的序列生成的若干状态序列[a1, a2, ..., at = k]中概率最大的状态序列的概率 
+        B = -np.ones((T, N), int) # B[t, k]  V[t, k]对应的序列中第t-1个状态
 
         V[0] = P + O[:, S[unlabeled_sequence[0]]]
         for t in range(1, T):
             for j in range(N):
                 vs = V[t - 1, :] + X[:, j]
-                best = np.argmax(vs)
+                best = np.argmax(vs) # 找到概率最大的状态序列
                 V[t, j] = vs[best] + O[j, S[unlabeled_sequence[t]]]
                 B[t, j] = best
 
+        # 倒序找到概率最大的状态序列
         current = np.argmax(V[T - 1, :])
         sequence = [current]
         for t in range(T - 1, 0, -1):
@@ -464,143 +439,17 @@ class HiddenMarkovModelTagger(TaggerI):
 
         sequence.reverse()
         return list(map(self._states.__getitem__, sequence))
+```
 
-    def best_path_simple(self, unlabeled_sequence):
-        """
-        Returns the state sequence of the optimal (most probable) path through
-        the HMM. Uses the Viterbi algorithm to calculate this part by dynamic
-        programming.  This uses a simple, direct method, and is included for
-        teaching purposes.
+HMM支持计算标签序列的熵
++ 信息熵的计算为 $\sum p * log(p)$
++ 熵的计算方法为$\sum P(s_1, s_2, ..., s_T | t_1, t_2, ..., t_T) log(P(s_1, s_2, ..., s_n| t_1, t_2, ..., t_T)$
++ 这里计算就是根据标签序列生成状态序列的概率计算熵
++ $P(t_1, t_2, ..., t_T)$即标签序列的产生概率前面已经论述过计算方法
++ $P(s_1, s_2, ..., s_T | t_1, t_2, ..., t_T) = P(s_1, s_2, ..., s_T, t_1, t_2, ..., t_T) \ P(t_1, t_2, ..., t_T) $
 
-        :return: the state sequence
-        :rtype: sequence of any
-        :param unlabeled_sequence: the sequence of unlabeled symbols
-        :type unlabeled_sequence: list
-        """
-        unlabeled_sequence = self._transform(unlabeled_sequence)
-        return self._best_path_simple(unlabeled_sequence)
-
-    def _best_path_simple(self, unlabeled_sequence):
-        T = len(unlabeled_sequence)
-        N = len(self._states)
-        V = np.zeros((T, N), np.float64)
-        B = {}
-
-        # find the starting log probabilities for each state
-        symbol = unlabeled_sequence[0]
-        for i, state in enumerate(self._states):
-            V[0, i] = self._priors.logprob(state) + self._output_logprob(state, symbol)
-            B[0, state] = None
-
-        # find the maximum log probabilities for reaching each state at time t
-        for t in range(1, T):
-            symbol = unlabeled_sequence[t]
-            for j in range(N):
-                sj = self._states[j]
-                best = None
-                for i in range(N):
-                    si = self._states[i]
-                    va = V[t - 1, i] + self._transitions[si].logprob(sj)
-                    if not best or va > best[0]:
-                        best = (va, si)
-                V[t, j] = best[0] + self._output_logprob(sj, symbol)
-                B[t, sj] = best[1]
-
-        # find the highest probability final state
-        best = None
-        for i in range(N):
-            val = V[T - 1, i]
-            if not best or val > best[0]:
-                best = (val, self._states[i])
-
-        # traverse the back-pointers B to find the state sequence
-        current = best[1]
-        sequence = [current]
-        for t in range(T - 1, 0, -1):
-            last = B[t, current]
-            sequence.append(last)
-            current = last
-
-        sequence.reverse()
-        return sequence
-
-    def random_sample(self, rng, length):
-        """
-        Randomly sample the HMM to generate a sentence of a given length. This
-        samples the prior distribution then the observation distribution and
-        transition distribution for each subsequent observation and state.
-        This will mostly generate unintelligible garbage, but can provide some
-        amusement.
-
-        :return:        the randomly created state/observation sequence,
-                        generated according to the HMM's probability
-                        distributions. The SUBTOKENS have TEXT and TAG
-                        properties containing the observation and state
-                        respectively.
-        :rtype:         list
-        :param rng:     random number generator
-        :type rng:      Random (or any object with a random() method)
-        :param length:  desired output length
-        :type length:   int
-        """
-
-        # sample the starting state and symbol prob dists
-        tokens = []
-        state = self._sample_probdist(self._priors, rng.random(), self._states)
-        symbol = self._sample_probdist(
-            self._outputs[state], rng.random(), self._symbols
-        )
-        tokens.append((symbol, state))
-
-        for i in range(1, length):
-            # sample the state transition and symbol prob dists
-            state = self._sample_probdist(
-                self._transitions[state], rng.random(), self._states
-            )
-            symbol = self._sample_probdist(
-                self._outputs[state], rng.random(), self._symbols
-            )
-            tokens.append((symbol, state))
-
-        return tokens
-
-    def _sample_probdist(self, probdist, p, samples):
-        cum_p = 0
-        for sample in samples:
-            add_p = probdist.prob(sample)
-            if cum_p <= p <= cum_p + add_p:
-                return sample
-            cum_p += add_p
-        raise Exception("Invalid probability distribution - " "does not sum to one")
-
+```python
     def entropy(self, unlabeled_sequence):
-        """
-        Returns the entropy over labellings of the given sequence. This is
-        given by::
-
-            H(O) = - sum_S Pr(S | O) log Pr(S | O)
-
-        where the summation ranges over all state sequences, S. Let
-        *Z = Pr(O) = sum_S Pr(S, O)}* where the summation ranges over all state
-        sequences and O is the observation sequence. As such the entropy can
-        be re-expressed as::
-
-            H = - sum_S Pr(S | O) log [ Pr(S, O) / Z ]
-            = log Z - sum_S Pr(S | O) log Pr(S, 0)
-            = log Z - sum_S Pr(S | O) [ log Pr(S_0) + sum_t Pr(S_t | S_{t-1}) + sum_t Pr(O_t | S_t) ]
-
-        The order of summation for the log terms can be flipped, allowing
-        dynamic programming to be used to calculate the entropy. Specifically,
-        we use the forward and backward probabilities (alpha, beta) giving::
-
-            H = log Z - sum_s0 alpha_0(s0) beta_0(s0) / Z * log Pr(s0)
-            + sum_t,si,sj alpha_t(si) Pr(sj | si) Pr(O_t+1 | sj) beta_t(sj) / Z * log Pr(sj | si)
-            + sum_t,st alpha_t(st) beta_t(st) / Z * log Pr(O_t | st)
-
-        This simply uses alpha and beta to find the probabilities of partial
-        sequences, constrained to include the given state(s) at some point in
-        time.
-        """
         unlabeled_sequence = self._transform(unlabeled_sequence)
 
         T = len(unlabeled_sequence)
@@ -608,7 +457,7 @@ class HiddenMarkovModelTagger(TaggerI):
 
         alpha = self._forward_probability(unlabeled_sequence)
         beta = self._backward_probability(unlabeled_sequence)
-        normalisation = logsumexp2(alpha[T - 1])
+        normalisation = logsumexp2(alpha[T - 1]) # 标签序列的概率
 
         entropy = normalisation
 
@@ -737,192 +586,25 @@ class HiddenMarkovModelTagger(TaggerI):
                 entropies[t] -= 2 ** (probabilities[t, s]) * probabilities[t, s]
 
         return entropies
+```
 
-    def _transitions_matrix(self):
-        """Return a matrix of transition log probabilities."""
-        trans_iter = (
-            self._transitions[sj].logprob(si)
-            for sj in self._states
-            for si in self._states
-        )
+**学习问题**：模型参数未知，推断模型参数。
+有两种可能的场景：
++ 监督学习的场景，已知诸多标签序列和对应的状态序列，推断模型参数，学习方法相对简单。
++ 非监督学习的场景，只知道诸多标签序列，推断模型参数，一般使用EM期望最大化方法进行迭代求解。
 
-        transitions_logprob = np.fromiter(trans_iter, dtype=np.float64)
-        N = len(self._states)
-        return transitions_logprob.reshape((N, N)).T
-
-    def _outputs_vector(self, symbol):
-        """
-        Return a vector with log probabilities of emitting a symbol
-        when entering states.
-        """
-        out_iter = (self._output_logprob(sj, symbol) for sj in self._states)
-        return np.fromiter(out_iter, dtype=np.float64)
-
-    def _forward_probability(self, unlabeled_sequence):
-        """
-        Return the forward probability matrix, a T by N array of
-        log-probabilities, where T is the length of the sequence and N is the
-        number of states. Each entry (t, s) gives the probability of being in
-        state s at time t after observing the partial symbol sequence up to
-        and including t.
-
-        :param unlabeled_sequence: the sequence of unlabeled symbols
-        :type unlabeled_sequence: list
-        :return: the forward log probability matrix
-        :rtype: array
-        """
-        T = len(unlabeled_sequence)
-        N = len(self._states)
-        alpha = _ninf_array((T, N))
-
-        transitions_logprob = self._transitions_matrix()
-
-        # Initialization
-        symbol = unlabeled_sequence[0][_TEXT]
-        for i, state in enumerate(self._states):
-            alpha[0, i] = self._priors.logprob(state) + self._output_logprob(
-                state, symbol
-            )
-
-        # Induction
-        for t in range(1, T):
-            symbol = unlabeled_sequence[t][_TEXT]
-            output_logprob = self._outputs_vector(symbol)
-
-            for i in range(N):
-                summand = alpha[t - 1] + transitions_logprob[i]
-                alpha[t, i] = logsumexp2(summand) + output_logprob[i]
-
-        return alpha
-
-    def _backward_probability(self, unlabeled_sequence):
-        """
-        Return the backward probability matrix, a T by N array of
-        log-probabilities, where T is the length of the sequence and N is the
-        number of states. Each entry (t, s) gives the probability of being in
-        state s at time t after observing the partial symbol sequence from t
-        .. T.
-
-        :return: the backward log probability matrix
-        :rtype:  array
-        :param unlabeled_sequence: the sequence of unlabeled symbols
-        :type unlabeled_sequence: list
-        """
-        T = len(unlabeled_sequence)
-        N = len(self._states)
-        beta = _ninf_array((T, N))
-
-        transitions_logprob = self._transitions_matrix().T
-
-        # initialise the backward values;
-        # "1" is an arbitrarily chosen value from Rabiner tutorial
-        beta[T - 1, :] = np.log2(1)
-
-        # inductively calculate remaining backward values
-        for t in range(T - 2, -1, -1):
-            symbol = unlabeled_sequence[t + 1][_TEXT]
-            outputs = self._outputs_vector(symbol)
-
-            for i in range(N):
-                summand = transitions_logprob[i] + beta[t + 1] + outputs
-                beta[t, i] = logsumexp2(summand)
-
-        return beta
-
-    def test(self, test_sequence, verbose=False, **kwargs):
-        """
-        Tests the HiddenMarkovModelTagger instance.
-
-        :param test_sequence: a sequence of labeled test instances
-        :type test_sequence: list(list)
-        :param verbose: boolean flag indicating whether training should be
-            verbose or include printed output
-        :type verbose: bool
-        """
-
-        def words(sent):
-            return [word for (word, tag) in sent]
-
-        def tags(sent):
-            return [tag for (word, tag) in sent]
-
-        def flatten(seq):
-            return list(itertools.chain(*seq))
-
-        test_sequence = self._transform(test_sequence)
-        predicted_sequence = list(map(self._tag, map(words, test_sequence)))
-
-        if verbose:
-            for test_sent, predicted_sent in zip(test_sequence, predicted_sequence):
-                print(
-                    "Test:",
-                    " ".join(f"{token}/{tag}" for (token, tag) in test_sent),
-                )
-                print()
-                print("Untagged:", " ".join("%s" % token for (token, tag) in test_sent))
-                print()
-                print(
-                    "HMM-tagged:",
-                    " ".join(f"{token}/{tag}" for (token, tag) in predicted_sent),
-                )
-                print()
-                print(
-                    "Entropy:",
-                    self.entropy([(token, None) for (token, tag) in predicted_sent]),
-                )
-                print()
-                print("-" * 60)
-
-        test_tags = flatten(map(tags, test_sequence))
-        predicted_tags = flatten(map(tags, predicted_sequence))
-
-        acc = accuracy(test_tags, predicted_tags)
-        count = sum(len(sent) for sent in test_sequence)
-        print("accuracy over %d tokens: %.2f" % (count, acc * 100))
-
-    def __repr__(self):
-        return "<HiddenMarkovModelTagger %d states and %d output symbols>" % (
-            len(self._states),
-            len(self._symbols),
-        )
-
-
+```python
 class HiddenMarkovModelTrainer:
     """
-    Algorithms for learning HMM parameters from training data. These include
-    both supervised learning (MLE) and unsupervised learning (Baum-Welch).
-
-    Creates an HMM trainer to induce an HMM with the given states and
-    output symbol alphabet. A supervised and unsupervised training
-    method may be used. If either of the states or symbols are not given,
-    these may be derived from supervised training.
-
-    :param states:  the set of state labels
-    :type states:   sequence of any
-    :param symbols: the set of observation symbols
-    :type symbols:  sequence of any
+    训练器的初始化只需要可能的状态序列和标签序列
     """
-
     def __init__(self, states=None, symbols=None):
         self._states = states if states else []
         self._symbols = symbols if symbols else []
 
     def train(self, labeled_sequences=None, unlabeled_sequences=None, **kwargs):
         """
-        Trains the HMM using both (or either of) supervised and unsupervised
-        techniques.
-
-        :return: the trained model
-        :rtype: HiddenMarkovModelTagger
-        :param labelled_sequences: the supervised training data, a set of
-            labelled sequences of observations
-            ex: [ (word_1, tag_1),...,(word_n,tag_n) ]
-        :type labelled_sequences: list
-        :param unlabeled_sequences: the unsupervised training data, a set of
-            sequences of observations
-            ex: [ word_1, ..., word_n ]
-        :type unlabeled_sequences: list
-        :param kwargs: additional arguments to pass to the training methods
+        根据标签序列是否带有状态序列选择有选择还是无选择洗脸
         """
         assert labeled_sequences or unlabeled_sequences
         model = None
