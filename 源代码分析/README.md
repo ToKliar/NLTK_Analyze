@@ -10,8 +10,8 @@ NLTK的各个功能实现在各个包里，大部分包（chunk、tag、tokenize
 
 这些包整体上按照接口模式进行架构，每一个包对应一种自然语言处理任务：
 + api.py文件中定义了接口，包含特定自然语言任务需要的方法和常量。通过接口，使用者可以用统一的方式使用统一的方法完成相应的任务。包中的所有模型都应该实现接口中定义的所有方法。
-+ util.py文件中定义了特定自然语言处理任务需要的通用的工具方法。
-+ 其余每个文件对应了一种特定自然语言处理任务的算法的实现，每个模型都需要基于接口定义的方法来实现对应的算法。
++ util.py文件中定义了多个模型需要的通用的工具方法。
++ 其余每个文件对应了一种特定自然语言处理任务的算法的实现，每个模型都需要基于接口定义的方法来实现对应的算法。文件的内容包含两个部分：第一部分是算法实现有关的类，第二部分是类需要的工具方法。
 
 ### **架构示例**
 
@@ -316,12 +316,16 @@ HMM通过probability方法计算标签序列出现的概率，采用前向或者
 
 前向算法是一个递推算法
 + 标签序列记为$[t_1, t_2, ..., t_T]$，状态序列为$[s_1, s_2, ..., s_T]$，状态集为$[o_1, o_2, ..., o_N]$，这里$t_i$是固定值，$s_i$非定值
++ $transition[i, k] = log(P(s_n = o_k | s_{n-1} = o_i)), n - 1 > 0$
 + $\lambda$表示模型中的参数
-+ 对应的alpha为 T x N矩阵（T为序列长度，N为状态集大小）
-+ $transition[i, k] = P(s_n = o_k | s_{n-1} = o_i), n - 1 > 0$
-+ $alpha[n, k] = P(t_1, t_2, ..., t_n, s_n = o_k | \lambda)$
-+ $alpha[1, k] = P(s_1 = o_k | \lambda) * P(t_1 | s_1 = o_k)$
-+ $alpha[n, k] = \sum_{i=1}^N P(t_1, t_2, ..., t_{n-1}, s_n = o_i | \lambda) * P(s_n = o_k | s_{n-1} = o_i) * P(t_n | s_n = o_k) = P(t_n | s_n = o_k) * \sum_{i=1}^N alpha[n-1,i] * transition[i, k]$
+
+前向算法用alpha矩阵计算标签序列的概率，alpha矩阵为 T x N矩阵（T为序列长度，N为状态集大小），矩阵中的某个元素用来表示标签序列的某个前缀序列对应的状态序列最后一个状态为某个特定状态的概率。因为生成概率经过不断的乘法累积会变得比较小，所以用对数表示会更加方便计算。
++ $alpha[n, k] = log(P(t_1, t_2, ..., t_n, s_n = o_k | \lambda))$
++ $alpha[1, k] = log(P(s_1 = o_k | \lambda) * P(t_1 | s_1 = o_k))$
+
+注意到对于长度为n的标签序列，其状态序列中最后一个状态为o_k的概率，为所有的前继状态（第n-1个状态）的概率乘以前继状态转移到o_k的概率再乘以o_k生成第n个标签的概率之和。具体推导如下：
++ $P(t_1, t_2, ..., t_n, s_n = o_k | \lambda) = \sum_{i=1}^N P(t_1, t_2, ..., t_{n-1}, s_n = o_i | \lambda) * P(s_n = o_k | s_{n-1} = o_i) * P(t_n | s_n = o_k) $
++ $alpha[n, k] = log(2^{output[k, t_n]} * \sum_{i=1}^N 2^{alpha[n-1,i] + transition[i, k]})$ 
 
 ```python
      def _forward_probability(self, unlabeled_sequence):
@@ -354,13 +358,16 @@ HMM通过probability方法计算标签序列出现的概率，采用前向或者
 
 后向算法也是递推算法
 + 标签序列记为$[t_1, t_2, ..., t_T]$，状态序列为$[s_1, s_2, ..., s_T]$，状态集为$[o_1, o_2, ..., o_N]$，这里$t_i$是固定值，$s_i$非定值
-+ 对应的beta为 T x N矩阵（T为序列长度，N为状态集大小）
-+ $transition[i, k] = P(s_n = o_k | s_{n-1} = o_i), n - 1 > 0$
-+ $prior[i] = P(s_1 = o_i | \lambda)$
-+ $beta[n, k] = P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda)$
-+ $beta[T, k] = 1$
-+ $beta[n, k] = P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda) = \sum_{i=1}^N P(t_T, t_{T-1}, ..., t_{n+1}, s_{n+1} = o_i | s_n = o_k , \lambda) = \sum_{i=1}^N P(t_T, t_{T-1}, ..., t_{n+2} | s_{n+1} = o_i, \lambda) * P (s_{n+1} = o_i | s_n = o_k) * P(t_{n+1} | s_{n + 1} = o_i) $
-+ $beta[n, k] = \sum_{i=1}^N transition[i, k] * P(t_{n+1} | s_{n + 1} = o_i) * beta[n + 1, i]$
++ $transition[i, k] = log(P(s_n = o_k | s_{n-1} = o_i)), n - 1 > 0$
++ $prior[i] = log(P(s_1 = o_i | \lambda))$
+
+后向算法从后往前进行递推，beta矩阵表示某个后缀标签序列的前一个状态为某个特定状态的概率，即后面的标签序列为$[t_{n+1}, ..., t_T]$时，第n个状态为某一特定状态的概率，表达式如下：
++ $beta[n, k] = log(P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda))$
++ $beta[T, k] = log(1)$
+
+递推方式的推导过程如下：
++ $P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda) = \sum_{i=1}^N P(t_T, t_{T-1}, ..., t_{n+1}, s_{n+1} = o_i | s_n = o_k , \lambda) = \sum_{i=1}^N P(t_T, t_{T-1}, ..., t_{n+2} | s_{n+1} = o_i, \lambda) * P (s_{n+1} = o_i | s_n = o_k) * P(t_{n+1} | s_{n + 1} = o_i) $
++ $beta[n, k] = log(P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda)) = log(\sum_{i=1}^N 2^{transition[i, k] * P(t_{n+1} | s_{n + 1} = o_i) * beta[n + 1, i]})$
 + 最终概率$P = \sum_{i=1}^N beta[1, i] * prior[i] * P(t_1 | s_1 = o_i)$
 
 ```python
@@ -446,7 +453,13 @@ HMM支持计算标签序列的熵
 + 熵的计算方法为$\sum P(s_1, s_2, ..., s_T | t_1, t_2, ..., t_T) log(P(s_1, s_2, ..., s_n| t_1, t_2, ..., t_T)$
 + 这里计算就是根据标签序列生成状态序列的概率计算熵
 + $P(t_1, t_2, ..., t_T)$即标签序列的产生概率前面已经论述过计算方法
-+ $P(s_1, s_2, ..., s_T | t_1, t_2, ..., t_T) = P(s_1, s_2, ..., s_T, t_1, t_2, ..., t_T) \ P(t_1, t_2, ..., t_T) $
++ $P(s_1, s_2, ..., s_T | t_1, t_2, ..., t_T) = \frac{P(s_1, s_2, ..., s_T, t_1, t_2, ..., t_T)}{P(t_1, t_2, ..., t_T)}$
+
+现在论述怎么计算熵
++ $alpha[n, k] = log(P(t_1, t_2, ..., t_n, s_n = o_k | \lambda))$
++ $beta[n, k] = log(P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda))$
++ $alpha[n, k] + beta[n, k] = log(P(t_1, t_2, ..., t_n, s_1 = o_k | \lambda) * P(t_T, t_{T-1}, ..., t_{n+1} | s_n = o_k , \lambda)) = log(P(t_1, t_2, ..., t_T, s_n = o_k | \lambda))$
++ $alpha[n, k] + beta[n+1, i] + transition[k][i] + output[i][t_{n+1}] = log(P(t_1, ..., t_n, s_n = o_k | \lambda) * P(t_T, t_{T-1}, ..., t_{n+2} | s_{n+1} = o_i , \lambda) * P(s_{n+1}=o_i | s_n=o_k) * P(t_{n+1} | s_{n+1}=o_i)) = log(P(t_1, ..., t_T, s_n = o_k, s_{n+1} = o_i)$
 
 ```python
     def entropy(self, unlabeled_sequence):
@@ -465,7 +478,6 @@ HMM支持计算标签序列的熵
         for i, state in enumerate(self._states):
             p = 2 ** (alpha[0, i] + beta[0, i] - normalisation)
             entropy -= p * self._priors.logprob(state)
-            # print('p(s_0 = %s) =' % state, p)
 
         # state transitions
         for t0 in range(T - 1):
@@ -480,7 +492,6 @@ HMM支持计算标签序列的熵
                         - normalisation
                     )
                     entropy -= p * self._transitions[s0].logprob(s1)
-                    # print('p(s_%d = %s, s_%d = %s) =' % (t0, s0, t1, s1), p)
 
         # symbol emissions
         for t in range(T):
@@ -489,7 +500,6 @@ HMM支持计算标签序列的熵
                 entropy -= p * self._outputs[state].logprob(
                     unlabeled_sequence[t][_TEXT]
                 )
-                # print('p(s_%d = %s) =' % (t, state), p)
 
         return entropy
 
