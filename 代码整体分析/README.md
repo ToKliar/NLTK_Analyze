@@ -1,8 +1,6 @@
-# **源代码分析**
+# **代码整体分析**
 
-这部分对NLTK库源代码分析   
-
-分析NLTK的具体实现和代码架构
+这部分分析NLTK库的程序构造原理、类库结构和高效能编程实践
 
 ## **代码架构**
 
@@ -31,6 +29,8 @@ python语言没有接口相关的定义，python通过抽象类实现Interface�
 #### **接口定义**
 
 TaggerI接口可以看成是对整个Tag任务的功能抽象，可以对Tag任务进行进一步抽象，如将基于特征集进行Tag任务的模型进行抽象，得到FeaturesetTaggerI接口，这里需要注意FeaturesetTaggerI是基于TaggerI定义的，是TaggerI的子类。
+
+TaggerI接口中包含了Tag任务中需要的所有的功能。
 
 ```python
 class TaggerI(metaclass=ABCMeta):
@@ -173,11 +173,13 @@ class StanfordTagger(TaggerI):
     pass
 ```
 
-## 高性能实践
+## **高性能实践**
 
-### 懒惰机制
+### **懒惰机制**
 
-**LazyImport** 
+为了减少运行时间，NLTK中大量使用了懒惰机制，即将部分工作推迟到不得不进行该工作的时候进行。这样可以减少代码的运行时间和存储消耗，提高性能。
+
+#### **LazyImport** 
 
 为了加速代码的启动时间，NLTK使用LazyImport的方式，直到代码从模块的命名空间中请求某个属性（对象或方法）时，这一属性才会实际导入到项目中。
 
@@ -218,10 +220,81 @@ def __getattr__(self, name):
         setattr(module, name, value)
 ```
 
-**Lazy Collection**
+#### **Lazy Collection**
 
-**Lazy DataLoader**
+为了提高Collection集合工具的性能，NLTK通过懒惰机制，重写了主要的几个Collection，LazyCollection的特点在于根据需要计算collection中的值，主要用于对语料库（corpus）的访问，只需要从磁盘文件中需要的语料库部分内容，而不是将整个语料库加载到内存中。
+
+这些LazyCollection都基于虚类``AbstractLazySequence``进行实现，包括
++ ``LazySubsequence``
++ ``LazyConcatenation``
++ ``LazyMap``
++ ``LazyZip``
++ ``LazyEnumerate``
++ ``LazyIteratorList``
+
+``LazyMap``可以看成是一个序列和对某个序列在某个函数的上映射，在``LazyMap``的实现中只有在访问到对应的值时才会使用函数对这个值进行映射，未访问情况下只会存储原始序列。而python内置的Map在初始化时就会计算序列中所有值的映射值，占据更多的内存。  
+如对corpus中的tokens进行分类，对应的featureset可能会占用大量内存，所以可以在训练和使用分类器时使用``LazyMap``来减小内存的占用量。
+```python
+class LazyMap(AbstractLazySequence):
+    def iterate_from(self, index):
+        # Special case: one lazy sublist
+        if len(self._lists) == 1 and self._all_lazy:
+            for value in self._lists[0].iterate_from(index):
+                yield self._func(value)
+            return
+
+        # Special case: one non-lazy sublist
+        elif len(self._lists) == 1:
+            while True:
+                try:
+                    yield self._func(self._lists[0][index])
+                except IndexError:
+                    return
+                index += 1
+
+        # Special case: n lazy sublists
+        elif self._all_lazy:
+            iterators = [lst.iterate_from(index) for lst in self._lists]
+            while True:
+                elements = []
+                for iterator in iterators:
+                    try:
+                        elements.append(next(iterator))
+                    except:  # FIXME: What is this except really catching? StopIteration?
+                        elements.append(None)
+                if elements == [None] * len(self._lists):
+                    return
+                yield self._func(*elements)
+                index += 1
+
+        # general case
+        else:
+            while True:
+                try:
+                    elements = [lst[index] for lst in self._lists]
+                except IndexError:
+                    elements = [None] * len(self._lists)
+                    for i, lst in enumerate(self._lists):
+                        try:
+                            elements[i] = lst[index]
+                        except IndexError:
+                            pass
+                    if elements == [None] * len(self._lists):
+                        return
+                yield self._func(*elements) # 在遍历的时候才会调用func
+                index += 1
+```
+
+#### **Lazy DataLoader**
+
+此外，NLTK通过``LazyLoader``支持对于数据集访问的懒惰访问，即只有需要读取对应的数据时才会将数据从磁盘Load到内存。  
+通过这种方式加载数据一方面减小了内存占用量（可以一次加载少量数据），另外一方面可以加速代码的运行（加载数据和数据处理如模型的训练等并行）
 
 ### 自定义数据结构
 
-为了统一模型的使用，NLTK自定义了很多数据结构，
+为了统一数据的管理，NLTK自定义了很多数据结构并对python原生的数据结构进行扩展，规范化数据的处理形式和展示形式，举例如下：
++ 概率分布、频率分布相关的数据结构定义在``probability.py``文件中，数据结构有：``FreqDist``和基于``ProbDistI``扩展的各种概率分布数据结构如``MLEProbDist``、``LidStoneProbDist``等等
++ 与特征有关的数据结构定义在``featstruct.py``中，主要是``FeatStruct``、``Feature``、``CustomFeatureValue``这三个基本的数据结构与其扩展的数据结构
++ ``decorators.py``中扩展了python原生的装饰器
+
+通过这种方式，NLTK将自然语言处理相关的数据结构规范化，可以通过NLTK的数据结构和模型完成从文本读取到自然语言处理任务执行整个流程而无需引入额外的包。大大减小了对外部库的依赖性和用户的学习成本，提高了使用上的便利性。
